@@ -1,0 +1,82 @@
+import logging
+import tensorflow as tf
+from src.layers.attention import AttentionLayer
+
+logger = logging.getLogger(__name__)
+
+
+def define_nmt(hidden_size, batch_size, en_timesteps, en_vsize, fr_timesteps, fr_vsize):
+    """ Defining a NMT model """
+
+    logger.debug("Defining Inputs")
+    # Define an input sequence and process it.
+    if batch_size:
+        encoder_inputs = tf.keras.layers.Input(batch_shape=(batch_size, en_timesteps, en_vsize), name='encoder_inputs')
+        decoder_inputs = tf.keras.layers.Input(batch_shape=(batch_size, fr_timesteps - 1, fr_vsize), name='decoder_inputs')
+    else:
+        encoder_inputs = tf.keras.layers.Input(shape=(en_timesteps, en_vsize), name='encoder_inputs')
+        if fr_timesteps:
+            decoder_inputs = tf.keras.layers.Input(shape=(fr_timesteps - 1, fr_vsize), name='decoder_inputs')
+        else:
+            decoder_inputs = tf.keras.layers.Input(shape=(None, fr_vsize), name='decoder_inputs')
+
+    logger.debug("Defining the sequential models")
+
+    # Encoder GRU
+    encoder_gru = tf.keras.layers.GRU(hidden_size, return_sequences=True, return_state=True, name='encoder_gru')
+    encoder_out, encoder_state = encoder_gru(encoder_inputs)
+
+    # Set up the decoder GRU, using `encoder_states` as initial state.
+    decoder_gru = tf.keras.layers.GRU(hidden_size, return_sequences=True, return_state=True, name='decoder_gru')
+    decoder_out, decoder_state = decoder_gru(decoder_inputs, initial_state=encoder_state)
+
+    logger.debug("Defining the attention layer")
+    # Attention layer
+    attn_layer = AttentionLayer(name='attention_layer')
+    attn_out, attn_states = attn_layer([encoder_out, decoder_out])
+
+    # Concat attention input and decoder GRU output
+    decoder_concat_input = tf.keras.layers.Concatenate(axis=-1, name='concat_layer')([decoder_out, attn_out])
+
+    logger.debug("Defining the dense layers")
+    # Dense layer
+    dense = tf.keras.layers.Dense(fr_vsize, activation='softmax', name='softmax_layer')
+    dense_time = tf.keras.layers.TimeDistributed(dense, name='time_distributed_layer')
+    decoder_pred = dense_time(decoder_concat_input)
+
+    logger.debug("Defining the full model")
+    # Full model
+    full_model = tf.keras.models.Model(inputs=[encoder_inputs, decoder_inputs], outputs=decoder_pred)
+    full_model.compile(optimizer='adam', loss='categorical_crossentropy')
+
+    full_model.summary()
+
+    """ Inference model """
+    batch_size = 1
+
+    logger.debug("Defining the inference model")
+
+    """ Encoder (Inference) model """
+    encoder_inf_inputs = tf.keras.layers.Input(batch_shape=(batch_size, en_timesteps, en_vsize), name='encoder_inf_inputs')
+    encoder_inf_out, encoder_inf_state = encoder_gru(encoder_inf_inputs)
+    encoder_model = tf.keras.models.Model(inputs=encoder_inf_inputs, outputs=[encoder_inf_out, encoder_inf_state])
+
+    """ Decoder (Inference) model """
+    decoder_inf_inputs = tf.keras.layers.Input(batch_shape=(batch_size, 1, fr_vsize), name='decoder_word_inputs')
+    encoder_inf_states = tf.keras.layers.Input(batch_shape=(batch_size, en_timesteps, hidden_size), name='encoder_inf_states')
+    decoder_init_state = tf.keras.layers.Input(batch_shape=(batch_size, hidden_size), name='decoder_init')
+
+    decoder_inf_out, decoder_inf_state = decoder_gru(decoder_inf_inputs, initial_state=decoder_init_state)
+    attn_inf_out, attn_inf_states = attn_layer([encoder_inf_states, decoder_inf_out])
+    decoder_inf_concat = tf.keras.layers.Concatenate(axis=-1, name='concat')([decoder_inf_out, attn_inf_out])
+    decoder_inf_pred = tf.keras.layers.TimeDistributed(dense)(decoder_inf_concat)
+    decoder_model = tf.keras.models.Model(inputs=[encoder_inf_states, decoder_init_state, decoder_inf_inputs],
+                          outputs=[decoder_inf_pred, attn_inf_states, decoder_inf_state])
+
+    return full_model, encoder_model, decoder_model
+
+
+if __name__ == '__main__':
+
+    """ Checking nmt model for toy examples """
+    define_nmt(64, None, 20, 30, 20, 20)
